@@ -338,22 +338,33 @@ public class CortexTSS implements TimeSeriesStorage {
 
     private static PrometheusTypes.TimeSeries.Builder toPrometheusTimeSeries(Sample sample) {
         PrometheusTypes.TimeSeries.Builder builder = PrometheusTypes.TimeSeries.newBuilder();
-        // Convert all of the tags to labels
-        Stream.concat(sample.getMetric().getIntrinsicTags().stream(), sample.getMetric().getMetaTags().stream())
-                .forEach(tag -> {
-                    // Special handling for the metric name
-                    if (IntrinsicTagNames.name.equals(tag.getKey())) {
-                        builder.addLabels(PrometheusTypes.Label.newBuilder()
-                                .setName(METRIC_NAME_LABEL)
-                                .setValue(sanitizeMetricName(tag.getValue())));
-                    } else {
-                        builder.addLabels(PrometheusTypes.Label.newBuilder()
-                                .setName(sanitizeLabelName(tag.getKey()))
-                                .setValue(sanitizeLabelValue(tag.getValue())));
-                    }
-                });
-
-
+        
+        // Collect all tags, including intrinsic and meta tags
+        List<Tag> allTags = Stream.concat(sample.getMetric().getIntrinsicTags().stream(), sample.getMetric().getMetaTags().stream())
+                                  .collect(Collectors.toList());
+        
+        // Special handling for the metric name: ensure it's first if present
+        Optional<Tag> metricNameTag = allTags.stream()
+                                             .filter(tag -> IntrinsicTagNames.name.equals(tag.getKey()))
+                                             .findFirst();
+        if (metricNameTag.isPresent()) {
+            builder.addLabels(PrometheusTypes.Label.newBuilder()
+                              .setName(METRIC_NAME_LABEL)
+                              .setValue(sanitizeMetricName(metricNameTag.get().getValue())));
+            allTags.remove(metricNameTag.get()); // Remove the metric name tag to avoid adding it twice
+        }
+    
+        // Sort remaining tags lexicographically by their sanitized names
+        List<PrometheusTypes.Label.Builder> sortedLabels = allTags.stream()
+                                                                   .map(tag -> PrometheusTypes.Label.newBuilder()
+                                                                     .setName(sanitizeLabelName(tag.getKey()))
+                                                                     .setValue(sanitizeLabelValue(tag.getValue())))
+                                                                   .sorted(Comparator.comparing(PrometheusTypes.Label.Builder::getName))
+                                                                   .collect(Collectors.toList());
+        
+        // Add sorted labels to the builder
+        sortedLabels.forEach(builder::addLabels);
+    
         // Add the sample timestamp & value
         builder.addSamples(PrometheusTypes.Sample.newBuilder()
                 .setTimestamp(sample.getTime().toEpochMilli())
