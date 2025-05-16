@@ -187,22 +187,30 @@ public class CortexTSS implements TimeSeriesStorage {
     }
 
     public void store(final List<Sample> samples, String clientID) throws StorageException {
-        final List<Sample> samplesSorted = samples.stream() // Cortex doesn't like the Samples to be out of time order
-                .filter(sample -> !sample.getValue().isNaN())
-                .sorted(Comparator.comparing(Sample::getTime))
-                .collect(Collectors.toList());
+        Map<String, List<Sample>> grouped = samples.stream()
+                .filter(s -> !s.getValue().isNaN())
+                .collect(Collectors.groupingBy(s -> s.getMetric().getKey()));
 
         PrometheusRemote.WriteRequest.Builder writeBuilder = PrometheusRemote.WriteRequest.newBuilder();
-        samplesSorted.forEach(s -> {
 
-            writeBuilder.addTimeseries(toPrometheusTimeSeries(s));
-            persistExternalTags(s);
+        grouped.values().forEach(group -> {
+            group.sort(Comparator.comparing(Sample::getTime));
+
+            PrometheusTypes.TimeSeries.Builder tsBuilder = PrometheusTypes.TimeSeries.newBuilder();
+            buildLabels(group.get(0).getMetric()).forEach(tsBuilder::addLabels);
+
+            group.forEach(s -> {
+                tsBuilder.addSamples(PrometheusTypes.Sample.newBuilder()
+                        .setTimestamp(s.getTime().toEpochMilli())
+                        .setValue(s.getValue()));
+                persistExternalTags(s);
+            });
+
+            writeBuilder.addTimeseries(tsBuilder);
         });
-
 
         PrometheusRemote.WriteRequest writeRequest = writeBuilder.build();
 
-        // Compress the write request using Snappy
         final byte[] writeRequestCompressed;
         try {
             writeRequestCompressed = Snappy.compress(writeRequest.toByteArray());
@@ -210,7 +218,6 @@ public class CortexTSS implements TimeSeriesStorage {
             throw new StorageException(e);
         }
 
-        // Build the HTTP request
         final RequestBody body = RequestBody.create(PROTOBUF_MEDIA_TYPE, writeRequestCompressed);
         final Request.Builder builder = new Request.Builder()
                 .url(config.getWriteUrl())
@@ -218,22 +225,43 @@ public class CortexTSS implements TimeSeriesStorage {
                 .addHeader("Content-Encoding", "snappy")
                 .addHeader("User-Agent", CortexTSS.class.getCanonicalName())
                 .post(body);
-        // Add the OrgId header if set
         if (clientID != null && clientID.trim().length() > 0) {
             builder.addHeader(X_SCOPE_ORG_ID_HEADER, clientID);
         }
         final Request request = builder.build();
 
         LOG.trace("Writing: {}", writeRequest);
+        final int written = grouped.values().stream().mapToInt(List::size).sum();
         asyncHttpCallsBulkhead.executeCompletionStage(() -> executeAsync(request)).whenComplete((r, ex) -> {
             if (ex == null) {
-                samplesWritten.mark(samplesSorted.size());
+                samplesWritten.mark(written);
             } else {
-                // FIXME: Data loss
                 samplesLost.mark(samples.size());
                 LOG.error("Error occurred while storing samples, sample will be lost.", ex);
             }
         });
+    }
+
+    private static List<PrometheusTypes.Label> buildLabels(Metric metric) {
+        return Stream.concat(metric.getIntrinsicTags().stream(),
+                            metric.getMetaTags().stream())
+                .map(tag -> {
+                    final String name;
+                    final String value;
+                    if (IntrinsicTagNames.name.equals(tag.getKey())) {
+                        name = METRIC_NAME_LABEL;
+                        value = sanitizeMetricName(tag.getValue());
+                    } else {
+                        name = sanitizeLabelName(tag.getKey());
+                        value = sanitizeLabelValue(tag.getValue());
+                    }
+                    return PrometheusTypes.Label.newBuilder()
+                            .setName(name)
+                            .setValue(value)
+                            .build();
+                })
+                .sorted(Comparator.comparing(PrometheusTypes.Label::getName))
+                .collect(Collectors.toList());
     }
 
     private void persistExternalTags(final Sample s) {
@@ -337,28 +365,41 @@ public class CortexTSS implements TimeSeriesStorage {
     }
 
     private static PrometheusTypes.TimeSeries.Builder toPrometheusTimeSeries(Sample sample) {
-        PrometheusTypes.TimeSeries.Builder builder = PrometheusTypes.TimeSeries.newBuilder();
-        // Convert all of the tags to labels
-        Stream.concat(sample.getMetric().getIntrinsicTags().stream(), sample.getMetric().getMetaTags().stream())
-                .forEach(tag -> {
-                    // Special handling for the metric name
+    // ------------------------------------------------------------------
+    // 1) Translate tags to Prometheus labels (with sanitization)
+    // 2) Sort by label name (lexicographically)
+    // 3) Assemble the TimeSeries with sorted labels
+    // Consistent with the Prometheus remote write spec: https://prometheus.io/docs/specs/prw/remote_write_spec/
+    // ------------------------------------------------------------------
+        List<PrometheusTypes.Label> labels = Stream
+                .concat(sample.getMetric().getIntrinsicTags().stream(),
+                        sample.getMetric().getMetaTags().stream())
+                .map(tag -> {
+                    final String labelName;
+                    final String labelValue;
                     if (IntrinsicTagNames.name.equals(tag.getKey())) {
-                        builder.addLabels(PrometheusTypes.Label.newBuilder()
-                                .setName(METRIC_NAME_LABEL)
-                                .setValue(sanitizeMetricName(tag.getValue())));
+                        labelName = METRIC_NAME_LABEL;
+                        labelValue = sanitizeMetricName(tag.getValue());
                     } else {
-                        builder.addLabels(PrometheusTypes.Label.newBuilder()
-                                .setName(sanitizeLabelName(tag.getKey()))
-                                .setValue(sanitizeLabelValue(tag.getValue())));
+                        labelName = sanitizeLabelName(tag.getKey());
+                        labelValue = sanitizeLabelValue(tag.getValue());
                     }
-                });
+                    return PrometheusTypes.Label.newBuilder()
+                            .setName(labelName)
+                            .setValue(labelValue)
+                            .build();
+                })
+                .sorted(Comparator.comparing(PrometheusTypes.Label::getName))
+                .collect(Collectors.toList());
 
+        PrometheusTypes.TimeSeries.Builder tsBuilder = PrometheusTypes.TimeSeries.newBuilder();
+        labels.forEach(tsBuilder::addLabels);
 
-        // Add the sample timestamp & value
-        builder.addSamples(PrometheusTypes.Sample.newBuilder()
+        tsBuilder.addSamples(PrometheusTypes.Sample.newBuilder()
                 .setTimestamp(sample.getTime().toEpochMilli())
                 .setValue(sample.getValue()));
-        return builder;
+
+        return tsBuilder;
     }
 
     public static String sanitizeMetricName(String metricName) {
