@@ -66,6 +66,7 @@ import org.opennms.integration.api.v1.timeseries.TagMatcher;
 import org.opennms.integration.api.v1.timeseries.TimeSeriesFetchRequest;
 import org.opennms.integration.api.v1.timeseries.TimeSeriesStorage;
 import org.opennms.integration.api.v1.timeseries.immutables.ImmutableTagMatcher.TagMatcherBuilder;
+import org.opennms.timeseries.cortex.batch.NonIsolableWriteException;
 import org.opennms.timeseries.cortex.batch.RemoteWriteSender;
 import org.opennms.timeseries.cortex.batch.RetryableWriteException;
 import org.opennms.timeseries.cortex.batch.ShardedWriteBatcher;
@@ -239,6 +240,17 @@ public class CortexTSS implements TimeSeriesStorage {
     }
 
     /**
+     * HTTP statuses that reject the request itself, not any particular series inside it: bad or
+     * expired credentials, the wrong tenant, the wrong endpoint, the wrong method. Every series in
+     * the request would fail identically, so {@link ShardedWriteBatcher} must not spend a request
+     * per series bisecting toward that foregone conclusion - see {@link NonIsolableWriteException}.
+     * Deliberately excludes 400 and 413: backends use 400 for a rejected series (out-of-order or
+     * duplicate samples, invalid labels), and a smaller bisected request can fit under a 413 that a
+     * larger one could not, so both are worth isolating.
+     */
+    private static final Set<Integer> NON_ISOLABLE_STATUS_CODES = Set.of(401, 403, 404, 405);
+
+    /**
      * The batcher's transport: one synchronous POST per assembled batch, executed on the shard
      * thread. Synchronous is load-bearing: the shard must not hand out a second request while one
      * is in flight, or per-series ordering is lost.
@@ -254,6 +266,9 @@ public class CortexTSS implements TimeSeriesStorage {
                         response.code(), response.message(), readBodyQuietly(response));
                 if (response.code() == 429 || response.code() >= 500) {
                     throw new RetryableWriteException(message);
+                }
+                if (NON_ISOLABLE_STATUS_CODES.contains(response.code())) {
+                    throw new NonIsolableWriteException(message);
                 }
                 throw new StorageException(message);
             } catch (IOException e) {

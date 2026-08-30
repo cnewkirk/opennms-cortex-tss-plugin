@@ -651,6 +651,54 @@ public class CortexTSSStoreTest {
         assertEquals(1, request.getTimeseriesCount());
     }
 
+    /**
+     * 401/403/404/405 reject the request itself, not either series in it - wrong credentials, wrong
+     * tenant, wrong endpoint. Bisecting to isolate an offender would corner nothing here, so the
+     * batch is dropped after exactly one request instead of the up-to-three a bisecting
+     * implementation would spend cornering two series individually.
+     */
+    @Test
+    public void batchedWritesDropImmediatelyOnANonIsolableStatus() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(401));
+        tss = storage(CortexTSSConfig.builder()
+                .batchingEnabled(true)
+                .batchShards(1)
+                .batchLingerMs(100)
+                .batchMaxRetries(5)
+                .batchRetryBackoffMs(10));
+
+        Instant t = Instant.now().truncatedTo(ChronoUnit.SECONDS);
+        tss.store(List.of(sample(gauge("batched_401_a"), t, 1.0), sample(gauge("batched_401_b"), t, 2.0)));
+
+        awaitMeter("samplesLost", 2);
+        assertEquals("a request-level rejection must not be retried or bisected",
+                1, server.getRequestCount());
+        assertEquals(0, meter("samplesWritten"));
+    }
+
+    /**
+     * A plain 400 plausibly names one bad series (an out-of-order or duplicate sample, an invalid
+     * label), so unlike 401/403/404/405 above it is still bisected to isolate the offender: the
+     * coalesced request, then each half.
+     */
+    @Test
+    public void batchedWritesIsolateAPoisonSeriesOnAPlain400() throws Exception {
+        for (int i = 0; i < 3; i++) {
+            server.enqueue(new MockResponse().setResponseCode(400).setBody("out of order sample"));
+        }
+        tss = storage(CortexTSSConfig.builder()
+                .batchingEnabled(true)
+                .batchShards(1)
+                .batchLingerMs(100));
+
+        Instant t = Instant.now().truncatedTo(ChronoUnit.SECONDS);
+        tss.store(List.of(sample(gauge("batched_400_a"), t, 1.0), sample(gauge("batched_400_b"), t, 2.0)));
+
+        awaitMeter("samplesLost", 2);
+        assertEquals("a 400 must still be bisected: the coalesced request, then each half",
+                3, server.getRequestCount());
+    }
+
     // ------------------------------------------------------------------
     // Harness
     // ------------------------------------------------------------------
