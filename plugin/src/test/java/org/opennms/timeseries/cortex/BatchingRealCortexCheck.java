@@ -37,7 +37,6 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -76,8 +75,8 @@ import org.opennms.integration.api.v1.timeseries.immutables.ImmutableSample;
  * <p>Unlike the existing IT tests, this specifically exercises {@code batchingEnabled=true}: many
  * distinct series, written from multiple concurrent threads in small OpenNMS-shaped groups (a
  * couple of samples each, interleaved across series - the exact case the per-sample Entry/Series
- * duplication fix targets), then read back and checked for correct values, correct per-series
- * order, and zero loss.
+ * duplication fix targets), then read back sample by sample: every series must hold exactly its
+ * written (timestamp, value) sequence, in order, with zero loss.
  */
 public class BatchingRealCortexCheck {
 
@@ -94,12 +93,16 @@ public class BatchingRealCortexCheck {
         final int seriesCount = 20;
         final int samplesPerSeries = 15;
         final Instant referenceTime = Instant.now().with(ChronoField.MICRO_OF_SECOND, 0L).minusSeconds(samplesPerSeries + 5);
+        // The lab's Cortex outlives test runs, and the verification below demands each series hold
+        // EXACTLY its written samples - so every run must write fresh series, or it would count the
+        // samples earlier runs left in the query window too.
+        final String runId = Long.toString(referenceTime.toEpochMilli(), 36);
 
         final Map<Metric, List<Sample>> bySeries = new LinkedHashMap<>();
         for (int s = 0; s < seriesCount; s++) {
             final Metric metric = ImmutableMetric.builder()
                     .intrinsicTag("resourceId", "e2e/node" + s)
-                    .intrinsicTag("name", "batching_e2e_metric_" + s)
+                    .intrinsicTag("name", "batching_e2e_" + runId + "_metric_" + s)
                     .metaTag("mtype", Metric.Mtype.gauge.name())
                     .build();
             final List<Sample> series = new ArrayList<>();
@@ -147,45 +150,65 @@ public class BatchingRealCortexCheck {
 
             // Verify against Cortex's query API directly rather than through CortexTSS#getTimeseries:
             // the write path is what changed here, and this repo's own CortexTSSIntegrationTest
-            // notes Cortex's range-query semantics for raw (unaggregated) data are quirky enough to
-            // need a workaround there. An instant query for each series' last value sidesteps that
-            // entirely while still proving what matters for this fix: every series landed under its
-            // own label set with the right value, with nothing cross-contaminated between series -
-            // exactly what a bug in the shared Series cache would corrupt.
+            // notes Cortex's query_range semantics for raw (unaggregated) data are quirky enough to
+            // need a workaround there - query_range returns step-aligned values, not the raw
+            // samples. An instant query over a range-vector selector (metric{...}[2m]) has no step
+            // to align to: it returns every raw sample in the window, so the assertion can demand
+            // the full sequence - every timestamp, every value, in order, nothing missing, nothing
+            // extra, for every series. A bug that dropped or corrupted intermediate samples while
+            // still landing each series' last one would pass a last-value check but not this.
             final HttpClient http = HttpClient.newHttpClient();
             for (Map.Entry<Metric, List<Sample>> entry : bySeries.entrySet()) {
                 final Metric metric = entry.getKey();
-                final double expectedLastValue = entry.getValue().get(entry.getValue().size() - 1).getValue();
+                final List<Sample> expected = entry.getValue();
                 final String metricName = metric.getIntrinsicTags().stream()
                         .filter(t -> "name".equals(t.getKey())).findFirst().orElseThrow().getValue();
                 final String resourceId = metric.getIntrinsicTags().stream()
                         .filter(t -> "resourceId".equals(t.getKey())).findFirst().orElseThrow().getValue();
-                final String query = String.format("%s{resourceId=\"%s\"}", metricName, resourceId);
+                final String query = String.format("%s{resourceId=\"%s\"}[2m]", metricName, resourceId);
                 final URI uri = URI.create("http://localhost:9009/prometheus/api/v1/query?query="
                         + URLEncoder.encode(query, StandardCharsets.UTF_8));
 
-                Awaitility.await("series " + metricName + " to report its last value")
+                Awaitility.await("series " + metricName + " to report all " + expected.size() + " samples")
                         .atMost(Duration.ofSeconds(30))
                         .pollInterval(Duration.ofMillis(200))
-                        .until(() -> queryInstantValue(http, uri).isPresent());
+                        .until(() -> querySamples(http, uri).size() >= expected.size());
 
-                final double actualLastValue = queryInstantValue(http, uri)
-                        .orElseThrow(() -> new AssertionError("no value for " + metricName));
-                assertEquals("the last value of " + metricName + " must round-trip untouched",
-                        expectedLastValue, actualLastValue, 0.0001);
+                final List<double[]> actual = querySamples(http, uri);
+                assertEquals("series " + metricName + " must hold exactly its written samples",
+                        expected.size(), actual.size());
+                for (int i = 0; i < expected.size(); i++) {
+                    assertEquals("timestamp of sample " + i + " of " + metricName,
+                            expected.get(i).getTime().toEpochMilli() / 1000.0, actual.get(i)[0], 0.0005);
+                    assertEquals("value of sample " + i + " of " + metricName,
+                            expected.get(i).getValue(), actual.get(i)[1], 0.0001);
+                }
             }
         } finally {
             storage.destroy();
         }
     }
 
-    private static Optional<Double> queryInstantValue(final HttpClient http, final URI uri) throws Exception {
+    /**
+     * Every raw (timestamp-in-seconds, value) pair the backend holds for the selector, in
+     * timestamp order; empty while the series has not appeared yet. Fails the test outright if the
+     * selector matches more than one stored series: one label set fanning out into several would
+     * mean the write path corrupted labels.
+     */
+    private static List<double[]> querySamples(final HttpClient http, final URI uri) throws Exception {
         final HttpResponse<String> response = http.send(HttpRequest.newBuilder(uri).GET().build(),
                 HttpResponse.BodyHandlers.ofString());
         final JSONArray result = new JSONObject(response.body()).getJSONObject("data").getJSONArray("result");
         if (result.isEmpty()) {
-            return java.util.Optional.empty();
+            return List.of();
         }
-        return java.util.Optional.of(result.getJSONObject(0).getJSONArray("value").getDouble(1));
+        assertEquals("one label set must land as exactly one stored series", 1, result.length());
+        final JSONArray values = result.getJSONObject(0).getJSONArray("values");
+        final List<double[]> samples = new ArrayList<>(values.length());
+        for (int i = 0; i < values.length(); i++) {
+            final JSONArray pair = values.getJSONArray(i);
+            samples.add(new double[]{pair.getDouble(0), pair.getDouble(1)});
+        }
+        return samples;
     }
 }
