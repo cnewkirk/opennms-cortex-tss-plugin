@@ -157,6 +157,90 @@ The batcher adds three metrics to the `opennms-cortex:stats` output: `batch.batc
 `batch.retries`, and the `batch.bufferedSamples` gauge. `samplesWritten` and `samplesLost` keep
 their meaning: samples acknowledged by the backend, and samples dropped anywhere in the plugin.
 
+## Monitoring the plugin
+
+The plugin keeps its own counters in a metric registry: `samplesWritten` and `samplesLost`
+(samples acknowledged by the backend, and samples dropped anywhere in the plugin), the
+external-tags cache meters, HTTP client gauges, and — with batching enabled — the `batch.*`
+metrics described above. There are two ways to read it:
+
+- **Interactively**, from the Karaf shell: `opennms-cortex:stats` prints a one-shot dump of the
+  whole registry.
+- **Continuously**, over JMX: the registry is mirrored as MBeans in the OpenNMS JVM under the
+  domain `org.opennms.plugins.tss.prometheus`. Object names follow
+  `org.opennms.plugins.tss.prometheus:name=<metric>,type=<meters|gauges>`; meters carry a `Count`
+  attribute (plus rates), gauges a `Value`.
+
+The JMX side means the collector that already gathers OpenNMS's own JVM statistics (the
+`OpenNMS-JVM` service on the OpenNMS node) can trend, graph, and alert on the plugin's counters —
+`samplesLost` is the one to watch — with a configuration-only change on the OpenNMS side: no core
+changes, no rebuild, just files under `$OPENNMS_HOME/etc/`. First a collection definition, e.g.
+`etc/jmx-datacollection-config.d/prometheus-remotewrite-plugin.xml`:
+
+```xml
+<jmx-datacollection-config>
+    <jmx-collection name="prometheus-remotewrite-plugin">
+        <rrd step="300">
+            <rra>RRA:AVERAGE:0.5:1:2016</rra>
+            <rra>RRA:AVERAGE:0.5:12:1488</rra>
+            <rra>RRA:AVERAGE:0.5:288:366</rra>
+            <rra>RRA:MAX:0.5:288:366</rra>
+            <rra>RRA:MIN:0.5:288:366</rra>
+        </rrd>
+        <mbeans>
+            <mbean name="PrometheusWriteSamples"
+                   objectname="org.opennms.plugins.tss.prometheus:name=samplesWritten,type=meters">
+                <attrib name="Count" alias="samplesWritten" type="counter"/>
+            </mbean>
+            <mbean name="PrometheusLostSamples"
+                   objectname="org.opennms.plugins.tss.prometheus:name=samplesLost,type=meters">
+                <attrib name="Count" alias="samplesLost" type="counter"/>
+            </mbean>
+            <mbean name="PrometheusBatchesSent"
+                   objectname="org.opennms.plugins.tss.prometheus:name=batch.batchesSent,type=meters">
+                <attrib name="Count" alias="batchesSent" type="counter"/>
+            </mbean>
+            <mbean name="PrometheusBatchRetries"
+                   objectname="org.opennms.plugins.tss.prometheus:name=batch.retries,type=meters">
+                <attrib name="Count" alias="batchRetries" type="counter"/>
+            </mbean>
+            <mbean name="PrometheusBatchBuffered"
+                   objectname="org.opennms.plugins.tss.prometheus:name=batch.bufferedSamples,type=gauges">
+                <attrib name="Value" alias="bufferedSamples" type="gauge"/>
+            </mbean>
+        </mbeans>
+    </jmx-collection>
+</jmx-datacollection-config>
+```
+
+then a service binding that collection in `etc/collectd-configuration.xml`, modeled on the
+existing `OpenNMS-JVM` service definition there (same package, same JMX port — adjust to your
+environment):
+
+```xml
+<service name="JMX-PrometheusRemoteWrite" interval="300000" user-defined="false" status="on">
+    <parameter key="port" value="18980"/>
+    <parameter key="protocol" value="rmi"/>
+    <parameter key="urlPath" value="/jmxrmi"/>
+    <parameter key="rrd-base-name" value="java"/>
+    <parameter key="collection" value="prometheus-remotewrite-plugin"/>
+    <parameter key="thresholding-enabled" value="true"/>
+    <parameter key="ds-name" value="prometheus-remotewrite"/>
+    <parameter key="friendly-name" value="prometheus-remotewrite"/>
+</service>
+<collector service="JMX-PrometheusRemoteWrite" class-name="org.opennms.netmgt.collectd.Jsr160Collector"/>
+```
+
+Notes:
+
+- The `batch.*` MBeans only exist while `batchingEnabled=true`; without batching, that part of the
+  collection simply yields no data.
+- The counters are per-JVM and reset on restart; `type="counter"` in the collection definition
+  handles that the same way any counter reset is handled.
+- The collected series are stored through this very plugin, which is exactly what you want for
+  the "is batching losing samples?" comparison: a nonzero `samplesLost` rate trends in the same
+  place as everything else.
+
 ## Sample ordering and out-of-order rejections
 
 With batching disabled, the plugin does **not** guarantee that write requests for a series arrive at the backend in timestamp order, and cannot.

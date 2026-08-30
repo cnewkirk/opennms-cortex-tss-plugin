@@ -79,6 +79,7 @@ import org.xerial.snappy.Snappy;
 import com.codahale.metrics.Gauge;
 import com.codahale.metrics.Meter;
 import com.codahale.metrics.MetricRegistry;
+import com.codahale.metrics.jmx.JmxReporter;
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.collect.Sets;
@@ -142,9 +143,13 @@ public class CortexTSS implements TimeSeriesStorage {
     /** The configured call timeout after clamping to what OkHttp accepts. See sanitizeCallTimeout. */
     private final long callTimeoutInMs;
 
+    /** JMX domain the plugin's metrics are published under - the plugin's config PID. */
+    public static final String JMX_DOMAIN = "org.opennms.plugins.tss.prometheus";
+
     private final MetricRegistry metrics = new MetricRegistry();
     private final Meter samplesWritten = metrics.meter("samplesWritten");
     private final Meter samplesLost = metrics.meter("samplesLost");
+    private final JmxReporter jmxReporter;
 
     // when retrieving aggregated time series data we loose the metric information and thus take it from cache
     private final Cache<String, Metric> metricCache;
@@ -226,6 +231,15 @@ public class CortexTSS implements TimeSeriesStorage {
         } else {
             this.batcher = null;
         }
+
+        // Mirror the registry as JMX MBeans so the collector already scraping this JVM for
+        // OpenNMS's own stats can trend and alert on these counters too - samplesLost in
+        // particular. The opennms-cortex:stats Karaf command shows the same registry
+        // interactively; see "Monitoring the plugin" in the README for a collection config
+        // snippet. Started after all metrics above are registered, though the reporter also
+        // picks up late registrations on its own.
+        this.jmxReporter = JmxReporter.forRegistry(metrics).inDomain(JMX_DOMAIN).build();
+        this.jmxReporter.start();
     }
 
     /**
@@ -920,6 +934,10 @@ public class CortexTSS implements TimeSeriesStorage {
     }
 
     public void destroy() throws InterruptedException {
+       // Unregister the MBeans first and unconditionally: a leftover registration would block a
+       // reloaded bundle's reporter from ever publishing its own.
+       jmxReporter.stop();
+
        if (batcher != null) {
            // Drain buffered samples while the HTTP client still works.
            batcher.destroy();
