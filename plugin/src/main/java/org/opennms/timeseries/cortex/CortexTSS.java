@@ -247,6 +247,14 @@ public class CortexTSS implements TimeSeriesStorage {
      * Deliberately excludes 400 and 413: backends use 400 for a rejected series (out-of-order or
      * duplicate samples, invalid labels), and a smaller bisected request can fit under a 413 that a
      * larger one could not, so both are worth isolating.
+     *
+     * <p>403 is a judgment call: a backend enforcing per-series ACLs could in principle 403 one
+     * series rather than the request, and bisection would then rescue the permitted ones. No
+     * mainstream remote-write backend does that - Cortex/Mimir/Thanos reject at the tenant or
+     * request level and use 400/429 for per-series and limit problems - while 403 from a
+     * misconfigured credential or tenant is exactly the standing failure whose bisection storms
+     * stall a shard. If such a backend ever materializes, revisit with response-body
+     * classification rather than a blanket recategorization.
      */
     private static final Set<Integer> NON_ISOLABLE_STATUS_CODES = Set.of(401, 403, 404, 405);
 
