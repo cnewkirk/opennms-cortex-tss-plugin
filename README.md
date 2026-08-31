@@ -175,24 +175,18 @@ metrics described above. There are two ways to read it:
   cannot start (or the runtime cannot wire the optional `metrics-jmx` package at all), the plugin
   logs one error and keeps storing samples without it.
 
-The JMX side means the collector that already gathers OpenNMS's own JVM statistics (the
-`OpenNMS-JVM` service on the OpenNMS node) can trend, graph, and alert on the plugin's counters —
-`samplesLost` is the one to watch — with configuration only: no core changes, no rebuild. Three
-pieces: enable `jmxReportingEnabled=true` in the plugin config
-(`etc/org.opennms.plugins.tss.prometheus.cfg`), then add a collection definition, e.g.
-`etc/jmx-datacollection-config.d/prometheus-remotewrite-plugin.xml`:
+The JMX side means the collection already gathering OpenNMS's own JVM statistics (the
+`OpenNMS-JVM` service, collection `jsr160`, auto-bound to the OpenNMS node by the shipped
+`OpenNMS-JVM` detector in the default foreign-source definition) can trend, graph, and alert on
+the plugin's counters — `samplesLost` is the one to watch — with configuration only: no core
+changes, no rebuild. Two steps:
+
+1. Enable `jmxReportingEnabled=true` in the plugin config
+   (`etc/org.opennms.plugins.tss.prometheus.cfg`, or `config:edit` in the Karaf shell).
+2. Edit `$OPENNMS_HOME/etc/jmx-datacollection-config.xml` and add these mbeans inside the
+   existing `<jmx-collection name="jsr160">` element's `<mbeans>` section:
 
 ```xml
-<jmx-datacollection-config>
-    <jmx-collection name="prometheus-remotewrite-plugin">
-        <rrd step="300">
-            <rra>RRA:AVERAGE:0.5:1:2016</rra>
-            <rra>RRA:AVERAGE:0.5:12:1488</rra>
-            <rra>RRA:AVERAGE:0.5:288:366</rra>
-            <rra>RRA:MAX:0.5:288:366</rra>
-            <rra>RRA:MIN:0.5:288:366</rra>
-        </rrd>
-        <mbeans>
             <mbean name="PrometheusWriteSamples"
                    objectname="org.opennms.plugins.tss.prometheus:name=samplesWritten,type=meters">
                 <attrib name="Count" alias="samplesWritten" type="counter"/>
@@ -213,31 +207,25 @@ pieces: enable `jmxReportingEnabled=true` in the plugin config
                    objectname="org.opennms.plugins.tss.prometheus:name=batch.bufferedSamples,type=gauges">
                 <attrib name="Value" alias="bufferedSamples" type="gauge"/>
             </mbean>
-        </mbeans>
-    </jmx-collection>
-</jmx-datacollection-config>
 ```
 
-then a service binding that collection in `etc/collectd-configuration.xml`, modeled on the
-existing `OpenNMS-JVM` service definition there (same package, same JMX port — adjust to your
-environment):
+Then reload collectd (`bin/send-event.pl uei.opennms.org/internal/reloadDaemonConfig --parm
+'daemonName Collectd'`) or restart OpenNMS. The next `OpenNMS-JVM` collection cycle picks the new
+mbeans up; no new service, no collectd-configuration.xml change, no provisioning work.
 
-```xml
-<service name="JMX-PrometheusRemoteWrite" interval="300000" user-defined="false" status="on">
-    <parameter key="port" value="18980"/>
-    <parameter key="protocol" value="rmi"/>
-    <parameter key="urlPath" value="/jmxrmi"/>
-    <parameter key="rrd-base-name" value="java"/>
-    <parameter key="collection" value="prometheus-remotewrite-plugin"/>
-    <parameter key="thresholding-enabled" value="true"/>
-    <parameter key="ds-name" value="prometheus-remotewrite"/>
-    <parameter key="friendly-name" value="prometheus-remotewrite"/>
-</service>
-<collector service="JMX-PrometheusRemoteWrite" class-name="org.opennms.netmgt.collectd.Jsr160Collector"/>
-```
+**Do not** try to extend `jsr160` from a file in `jmx-datacollection-config.d/` instead: OpenNMS
+does not merge same-named collections — the last one loaded replaces the other wholesale
+(`JmxDatacollectionConfig#merge` appends collections and the config DAO maps them by name), so a
+`.d` file named `jsr160` would silently replace the stock collection and its JVM statistics.
+
+A dedicated collection and service (a `.d` file with its own collection name, plus a `<service>`
+and `<collector>` entry in `collectd-configuration.xml` modeled on `OpenNMS-JVM`) also works and
+keeps the shipped file pristine, but requires one extra step the `jsr160` route avoids: collectd
+only collects services bound to a node's interface, and no detector exists for a custom service
+name — so the service must be added to the OpenNMS node's requisition (or a `Jsr160Detector`
+with the matching name added to its foreign-source definition) and synchronized.
 
 Notes:
-
 - The `batch.*` MBeans only exist while `batchingEnabled=true`; without batching, that part of the
   collection simply yields no data.
 - The counters are per-JVM and reset on restart; `type="counter"` in the collection definition
