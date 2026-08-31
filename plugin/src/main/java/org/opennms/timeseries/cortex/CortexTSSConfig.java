@@ -25,6 +25,7 @@ public class CortexTSSConfig {
     private final int batchMaxRetries;
     private final long batchRetryBackoffMs;
     private final long batchEnqueueTimeoutMs;
+    private final boolean jmxReportingEnabled;
 
     public CortexTSSConfig() {
         this(builder());
@@ -52,6 +53,7 @@ public class CortexTSSConfig {
         this.batchMaxRetries = builder.batchMaxRetries;
         this.batchRetryBackoffMs = builder.batchRetryBackoffMs;
         this.batchEnqueueTimeoutMs = builder.batchEnqueueTimeoutMs;
+        this.jmxReportingEnabled = builder.jmxReportingEnabled;
     }
 
     /** Will be called via blueprint. The builder can be called when not running as Osgi plugin. */
@@ -75,7 +77,8 @@ public class CortexTSSConfig {
             final int batchShardCapacity,
             final int batchMaxRetries,
             final long batchRetryBackoffMs,
-            final long batchEnqueueTimeoutMs) {
+            final long batchEnqueueTimeoutMs,
+            final boolean jmxReportingEnabled) {
         this(builder()
                 .writeUrl(writeUrl)
                 .readUrl(readUrl)
@@ -96,7 +99,8 @@ public class CortexTSSConfig {
                 .batchShardCapacity(batchShardCapacity)
                 .batchMaxRetries(batchMaxRetries)
                 .batchRetryBackoffMs(batchRetryBackoffMs)
-                .batchEnqueueTimeoutMs(batchEnqueueTimeoutMs));
+                .batchEnqueueTimeoutMs(batchEnqueueTimeoutMs)
+                .jmxReportingEnabled(jmxReportingEnabled));
     }
 
     public String getWriteUrl() {
@@ -203,6 +207,10 @@ public class CortexTSSConfig {
         return batchEnqueueTimeoutMs;
     }
 
+    public boolean isJmxReportingEnabled() {
+        return jmxReportingEnabled;
+    }
+
     public static Builder builder() {
         return new Builder();
     }
@@ -228,6 +236,7 @@ public class CortexTSSConfig {
         private int batchMaxRetries = 3;
         private long batchRetryBackoffMs = 1000;
         private long batchEnqueueTimeoutMs = 5000;
+        private boolean jmxReportingEnabled = false;
 
         public Builder writeUrl(final String writeUrl) {
             this.writeUrl = writeUrl;
@@ -328,6 +337,11 @@ public class CortexTSSConfig {
             return this;
         }
 
+        public Builder jmxReportingEnabled(final boolean jmxReportingEnabled) {
+            this.jmxReportingEnabled = jmxReportingEnabled;
+            return this;
+        }
+
         public CortexTSSConfig build() {
             return new CortexTSSConfig(this);
         }
@@ -356,6 +370,7 @@ public class CortexTSSConfig {
                 .add("batchMaxRetries=" + batchMaxRetries)
                 .add("batchRetryBackoffMs=" + batchRetryBackoffMs)
                 .add("batchEnqueueTimeoutMs=" + batchEnqueueTimeoutMs)
+                .add("jmxReportingEnabled=" + jmxReportingEnabled)
                 .toString();
     }
 }

@@ -32,9 +32,11 @@ import javax.management.ObjectName;
 import org.junit.Test;
 
 /**
- * The plugin's metrics must be reachable through the JMX machinery OpenNMS already scrapes its own
- * JVM with (the OpenNMS-JVM service / Jsr160 collector) - not only through the interactive
- * {@code opennms-cortex:stats} Karaf command - or samplesLost cannot be trended or alerted on.
+ * With {@code jmxReportingEnabled}, the plugin's metrics must be reachable through the JMX
+ * machinery OpenNMS already scrapes its own JVM with (the OpenNMS-JVM service / Jsr160 collector)
+ * - not only through the interactive {@code opennms-cortex:stats} Karaf command - or samplesLost
+ * cannot be trended or alerted on. Without it - the default - the plugin must leave the MBean
+ * server alone entirely: reporting is opt-in observability, and its default must be inert.
  */
 public class CortexTSSJmxMetricsTest {
 
@@ -48,7 +50,8 @@ public class CortexTSSJmxMetricsTest {
         assertFalse("another CortexTSS instance leaked its MBeans; fix that test's teardown first",
                 server.isRegistered(samplesLost));
 
-        final CortexTSS tss = new CortexTSS(CortexTSSConfig.builder().batchingEnabled(true).build(),
+        final CortexTSS tss = new CortexTSS(
+                CortexTSSConfig.builder().batchingEnabled(true).jmxReportingEnabled(true).build(),
                 new KVStoreMock());
         try {
             assertEquals("a meter must surface its count", 0L, server.getAttribute(samplesLost, "Count"));
@@ -59,5 +62,20 @@ public class CortexTSSJmxMetricsTest {
         assertFalse("destroy() must unregister the MBeans, or a reloaded bundle could never publish its own",
                 server.isRegistered(samplesLost));
         assertFalse(server.isRegistered(bufferedSamples));
+    }
+
+    @Test
+    public void registersNoMBeansUnlessAskedTo() throws Exception {
+        final MBeanServer server = ManagementFactory.getPlatformMBeanServer();
+        final ObjectName anyOfOurs = new ObjectName(CortexTSS.JMX_DOMAIN + ":*");
+
+        final CortexTSS tss = new CortexTSS(CortexTSSConfig.builder().batchingEnabled(true).build(),
+                new KVStoreMock());
+        try {
+            assertEquals("the default configuration must not touch the MBean server",
+                    0, server.queryNames(anyOfOurs, null).size());
+        } finally {
+            tss.destroy();
+        }
     }
 }

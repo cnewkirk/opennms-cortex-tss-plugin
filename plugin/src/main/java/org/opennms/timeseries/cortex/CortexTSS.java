@@ -236,10 +236,27 @@ public class CortexTSS implements TimeSeriesStorage {
         // OpenNMS's own stats can trend and alert on these counters too - samplesLost in
         // particular. The opennms-cortex:stats Karaf command shows the same registry
         // interactively; see "Monitoring the plugin" in the README for a collection config
-        // snippet. Started after all metrics above are registered, though the reporter also
-        // picks up late registrations on its own.
-        this.jmxReporter = JmxReporter.forRegistry(metrics).inDomain(JMX_DOMAIN).build();
-        this.jmxReporter.start();
+        // snippet. Off unless asked for, and even then nothing here may propagate: this is
+        // observability for the storage path, and it must never be the thing that takes the
+        // storage path down.
+        this.jmxReporter = config.isJmxReportingEnabled() ? startJmxReporter() : null;
+    }
+
+    /**
+     * @return the started reporter, or null when reporting could not be started - including when
+     *         the OSGi runtime could not wire {@code com.codahale.metrics.jmx} at all (the import
+     *         is declared optional), which surfaces here as a {@link NoClassDefFoundError}.
+     */
+    private JmxReporter startJmxReporter() {
+        try {
+            final JmxReporter reporter = JmxReporter.forRegistry(metrics).inDomain(JMX_DOMAIN).build();
+            reporter.start();
+            return reporter;
+        } catch (Throwable e) {
+            LOG.error("JMX metric reporting could not be started; continuing without it. "
+                    + "The opennms-cortex:stats shell command is unaffected.", e);
+            return null;
+        }
     }
 
     /**
@@ -934,9 +951,16 @@ public class CortexTSS implements TimeSeriesStorage {
     }
 
     public void destroy() throws InterruptedException {
-       // Unregister the MBeans first and unconditionally: a leftover registration would block a
-       // reloaded bundle's reporter from ever publishing its own.
-       jmxReporter.stop();
+       // Unregister the MBeans first: a leftover registration would block a reloaded bundle's
+       // reporter from ever publishing its own. Guarded like startup - teardown of the
+       // observability must never keep the batcher from draining.
+       if (jmxReporter != null) {
+           try {
+               jmxReporter.stop();
+           } catch (Throwable e) {
+               LOG.warn("Failed to stop the JMX metric reporter; its MBeans may linger until JVM restart.", e);
+           }
+       }
 
        if (batcher != null) {
            // Drain buffered samples while the HTTP client still works.

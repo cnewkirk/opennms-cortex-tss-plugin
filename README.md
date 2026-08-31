@@ -67,6 +67,7 @@ property-set batchShardCapacity 65536
 property-set batchMaxRetries 3
 property-set batchRetryBackoffMs 1000
 property-set batchEnqueueTimeoutMs 5000
+property-set jmxReportingEnabled false
 
 config:update
 ```
@@ -166,15 +167,19 @@ metrics described above. There are two ways to read it:
 
 - **Interactively**, from the Karaf shell: `opennms-cortex:stats` prints a one-shot dump of the
   whole registry.
-- **Continuously**, over JMX: the registry is mirrored as MBeans in the OpenNMS JVM under the
-  domain `org.opennms.plugins.tss.prometheus`. Object names follow
+- **Continuously**, over JMX — **opt-in, off by default**: with `jmxReportingEnabled=true`, the
+  registry is mirrored as MBeans in the OpenNMS JVM under the domain
+  `org.opennms.plugins.tss.prometheus`. Object names follow
   `org.opennms.plugins.tss.prometheus:name=<metric>,type=<meters|gauges>`; meters carry a `Count`
-  attribute (plus rates), gauges a `Value`.
+  attribute (plus rates), gauges a `Value`. Reporting is isolated from the storage path: if it
+  cannot start (or the runtime cannot wire the optional `metrics-jmx` package at all), the plugin
+  logs one error and keeps storing samples without it.
 
 The JMX side means the collector that already gathers OpenNMS's own JVM statistics (the
 `OpenNMS-JVM` service on the OpenNMS node) can trend, graph, and alert on the plugin's counters —
-`samplesLost` is the one to watch — with a configuration-only change on the OpenNMS side: no core
-changes, no rebuild, just files under `$OPENNMS_HOME/etc/`. First a collection definition, e.g.
+`samplesLost` is the one to watch — with configuration only: no core changes, no rebuild. Three
+pieces: enable `jmxReportingEnabled=true` in the plugin config
+(`etc/org.opennms.plugins.tss.prometheus.cfg`), then add a collection definition, e.g.
 `etc/jmx-datacollection-config.d/prometheus-remotewrite-plugin.xml`:
 
 ```xml

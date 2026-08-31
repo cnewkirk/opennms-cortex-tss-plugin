@@ -28,6 +28,10 @@
                         <Karaf-Commands>*</Karaf-Commands>
                         <!-- Nothing to export -->
                         <Export-Package></Export-Package>
+                        <!-- JMX reporting is opt-in observability (jmxReportingEnabled): the
+                             storage plugin must resolve and run even where this package cannot
+                             be wired. CortexTSS guards the class use accordingly. -->
+                        <Import-Package>com.codahale.metrics.jmx;resolution:=optional,*</Import-Package>
                     </instructions>
                 </configuration>
             </plugin>
