@@ -171,9 +171,11 @@ metrics described above. There are two ways to read it:
   registry is mirrored as MBeans in the OpenNMS JVM under the domain
   `org.opennms.plugins.tss.prometheus`. Object names follow
   `org.opennms.plugins.tss.prometheus:name=<metric>,type=<meters|gauges>`; meters carry a `Count`
-  attribute (plus rates), gauges a `Value`. Reporting is isolated from the storage path: if it
-  cannot start (or the runtime cannot wire the optional `metrics-jmx` package at all), the plugin
-  logs one error and keeps storing samples without it.
+  attribute, gauges a `Value`. The publisher is implemented directly on the JDK's
+  `javax.management` API — no extra bundles, nothing that can fail to wire — and it announces
+  itself in the log at INFO on every start: `JMX metric reporting started: N MBeans registered
+  in domain org.opennms.plugins.tss.prometheus.` If that line is absent with the flag enabled,
+  reporting did not start and the log says why; it is isolated from the storage path either way.
 
 The JMX side means the collection already gathering OpenNMS's own JVM statistics (the
 `OpenNMS-JVM` service, collection `jsr160`, auto-bound to the OpenNMS node by the shipped

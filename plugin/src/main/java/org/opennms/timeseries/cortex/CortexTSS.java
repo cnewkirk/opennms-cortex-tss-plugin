@@ -79,7 +79,6 @@ import org.xerial.snappy.Snappy;
 import com.codahale.metrics.Gauge;
 import com.codahale.metrics.Meter;
 import com.codahale.metrics.MetricRegistry;
-import com.codahale.metrics.jmx.JmxReporter;
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.collect.Sets;
@@ -149,7 +148,7 @@ public class CortexTSS implements TimeSeriesStorage {
     private final MetricRegistry metrics = new MetricRegistry();
     private final Meter samplesWritten = metrics.meter("samplesWritten");
     private final Meter samplesLost = metrics.meter("samplesLost");
-    private final JmxReporter jmxReporter;
+    private final RegistryJmxPublisher jmxPublisher;
 
     // when retrieving aggregated time series data we loose the metric information and thus take it from cache
     private final Cache<String, Metric> metricCache;
@@ -238,20 +237,17 @@ public class CortexTSS implements TimeSeriesStorage {
         // interactively; see "Monitoring the plugin" in the README for a collection config
         // snippet. Off unless asked for, and even then nothing here may propagate: this is
         // observability for the storage path, and it must never be the thing that takes the
-        // storage path down.
-        this.jmxReporter = config.isJmxReportingEnabled() ? startJmxReporter() : null;
+        // storage path down. RegistryJmxPublisher is pure JDK javax.management - it logs at
+        // INFO how many MBeans it registered, and has no dependency that can fail to wire.
+        this.jmxPublisher = config.isJmxReportingEnabled() ? startJmxPublisher() : null;
     }
 
-    /**
-     * @return the started reporter, or null when reporting could not be started - including when
-     *         the OSGi runtime could not wire {@code com.codahale.metrics.jmx} at all (the import
-     *         is declared optional), which surfaces here as a {@link NoClassDefFoundError}.
-     */
-    private JmxReporter startJmxReporter() {
+    /** @return the started publisher, or null when it could not be started. */
+    private RegistryJmxPublisher startJmxPublisher() {
         try {
-            final JmxReporter reporter = JmxReporter.forRegistry(metrics).inDomain(JMX_DOMAIN).build();
-            reporter.start();
-            return reporter;
+            final RegistryJmxPublisher publisher = new RegistryJmxPublisher(metrics, JMX_DOMAIN);
+            publisher.start();
+            return publisher;
         } catch (Throwable e) {
             LOG.error("JMX metric reporting could not be started; continuing without it. "
                     + "The opennms-cortex:stats shell command is unaffected.", e);
@@ -952,13 +948,13 @@ public class CortexTSS implements TimeSeriesStorage {
 
     public void destroy() throws InterruptedException {
        // Unregister the MBeans first: a leftover registration would block a reloaded bundle's
-       // reporter from ever publishing its own. Guarded like startup - teardown of the
+       // publisher from ever registering its own. Guarded like startup - teardown of the
        // observability must never keep the batcher from draining.
-       if (jmxReporter != null) {
+       if (jmxPublisher != null) {
            try {
-               jmxReporter.stop();
+               jmxPublisher.stop();
            } catch (Throwable e) {
-               LOG.warn("Failed to stop the JMX metric reporter; its MBeans may linger until JVM restart.", e);
+               LOG.warn("Failed to stop the JMX metric publisher; its MBeans may linger until JVM restart.", e);
            }
        }
 
