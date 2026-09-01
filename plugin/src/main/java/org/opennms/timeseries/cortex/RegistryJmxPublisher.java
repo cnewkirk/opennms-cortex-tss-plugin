@@ -33,6 +33,7 @@ import javax.management.AttributeList;
 import javax.management.AttributeNotFoundException;
 import javax.management.DynamicMBean;
 import javax.management.MBeanAttributeInfo;
+import javax.management.MBeanException;
 import javax.management.MBeanInfo;
 import javax.management.MBeanServer;
 import javax.management.ObjectName;
@@ -198,7 +199,8 @@ final class RegistryJmxPublisher {
 
         @Override
         public void setAttribute(final Attribute attribute) throws AttributeNotFoundException {
-            throw new AttributeNotFoundException(attribute.getName() + " is read-only");
+            throw new AttributeNotFoundException(
+                    (attribute == null ? "(null)" : attribute.getName()) + " is read-only");
         }
 
         @Override
@@ -207,8 +209,9 @@ final class RegistryJmxPublisher {
         }
 
         @Override
-        public Object invoke(final String actionName, final Object[] params, final String[] signature) {
-            throw new UnsupportedOperationException(actionName);
+        public Object invoke(final String actionName, final Object[] params, final String[] signature)
+                throws MBeanException {
+            throw new MBeanException(new UnsupportedOperationException(actionName), "no operations");
         }
 
         @Override

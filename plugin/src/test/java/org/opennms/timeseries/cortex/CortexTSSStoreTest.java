@@ -652,7 +652,7 @@ public class CortexTSSStoreTest {
     }
 
     /**
-     * 401/403/404/405 reject the request itself, not either series in it - wrong credentials, wrong
+     * A 401 rejects the request itself, not either series in it - wrong credentials, wrong
      * tenant, wrong endpoint. Bisecting to isolate an offender would corner nothing here, so the
      * batch is dropped after exactly one request instead of the up-to-three a bisecting
      * implementation would spend cornering two series individually.
@@ -677,9 +677,32 @@ public class CortexTSSStoreTest {
     }
 
     /**
+     * The classification is not an enumerated list: every non-retryable 4xx short of 400 and 413
+     * is request-level. 415 - an unsupported payload encoding - stands in for the long tail.
+     */
+    @Test
+    public void batchedWritesDropImmediatelyOnAnyRequestLevel4xx() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(415));
+        tss = storage(CortexTSSConfig.builder()
+                .batchingEnabled(true)
+                .batchShards(1)
+                .batchLingerMs(100)
+                .batchMaxRetries(5)
+                .batchRetryBackoffMs(10));
+
+        Instant t = Instant.now().truncatedTo(ChronoUnit.SECONDS);
+        tss.store(List.of(sample(gauge("batched_415_a"), t, 1.0), sample(gauge("batched_415_b"), t, 2.0)));
+
+        awaitMeter("samplesLost", 2);
+        assertEquals("a request-level rejection must not be retried or bisected",
+                1, server.getRequestCount());
+        assertEquals(0, meter("samplesWritten"));
+    }
+
+    /**
      * A plain 400 plausibly names one bad series (an out-of-order or duplicate sample, an invalid
-     * label), so unlike 401/403/404/405 above it is still bisected to isolate the offender: the
-     * coalesced request, then each half.
+     * label), so unlike the request-level statuses above it is still bisected to isolate the
+     * offender: the coalesced request, then each half.
      */
     @Test
     public void batchedWritesIsolateAPoisonSeriesOnAPlain400() throws Exception {

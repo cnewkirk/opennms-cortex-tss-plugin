@@ -267,13 +267,16 @@ public class CortexTSS implements TimeSeriesStorage {
     }
 
     /**
-     * HTTP statuses that reject the request itself, not any particular series inside it: bad or
-     * expired credentials, the wrong tenant, the wrong endpoint, the wrong method. Every series in
-     * the request would fail identically, so {@link ShardedWriteBatcher} must not spend a request
-     * per series bisecting toward that foregone conclusion - see {@link NonIsolableWriteException}.
-     * Deliberately excludes 400 and 413: backends use 400 for a rejected series (out-of-order or
-     * duplicate samples, invalid labels), and a smaller bisected request can fit under a 413 that a
-     * larger one could not, so both are worth isolating.
+     * Whether an HTTP status rejects the request itself rather than any particular series inside
+     * it - bad or expired credentials (401), the wrong tenant (403), the wrong endpoint (404),
+     * the wrong method (405), an unsupported payload encoding (415), and the rest of that long
+     * tail. Every series in such a request would fail identically, so {@link ShardedWriteBatcher}
+     * must not spend a request per series bisecting toward that foregone conclusion - see
+     * {@link NonIsolableWriteException}. Rather than enumerate request-level codes, every
+     * non-retryable 4xx is request-level except the two a backend plausibly ties to one series:
+     * 400, the remote-write spec's status for rejected samples (out-of-order, duplicates, invalid
+     * labels), and 413, which a smaller bisected request can fit under. 429 never reaches this
+     * check - it is retried.
      *
      * <p>403 is a judgment call: a backend enforcing per-series ACLs could in principle 403 one
      * series rather than the request, and bisection would then rescue the permitted ones. No
@@ -283,7 +286,9 @@ public class CortexTSS implements TimeSeriesStorage {
      * stall a shard. If such a backend ever materializes, revisit with response-body
      * classification rather than a blanket recategorization.
      */
-    private static final Set<Integer> NON_ISOLABLE_STATUS_CODES = Set.of(401, 403, 404, 405);
+    private static boolean isNonIsolableStatus(final int status) {
+        return status >= 400 && status < 500 && status != 400 && status != 413 && status != 429;
+    }
 
     /**
      * The batcher's transport: one synchronous POST per assembled batch, executed on the shard
@@ -302,7 +307,7 @@ public class CortexTSS implements TimeSeriesStorage {
                 if (response.code() == 429 || response.code() >= 500) {
                     throw new RetryableWriteException(message);
                 }
-                if (NON_ISOLABLE_STATUS_CODES.contains(response.code())) {
+                if (isNonIsolableStatus(response.code())) {
                     throw new NonIsolableWriteException(message);
                 }
                 throw new StorageException(message);
