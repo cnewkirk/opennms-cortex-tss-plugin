@@ -437,10 +437,6 @@ public class ShardedWriteBatcherTest {
     }
 
     /**
-     * Nothing the send path throws may kill the shard thread: a dead shard silently strands every
-     * series hashed to it until restart while the other shards look healthy.
-     */
-    /**
      * A rejection that is request-wide in effect but arrives as a plain 400 - timestamps the
      * backend no longer accepts, a tenant over its series limit - must not cost one request per
      * series: with n series all failing, naive bisection spends 2n-1 sequential requests on the
@@ -494,6 +490,10 @@ public class ShardedWriteBatcherTest {
         assertEquals(3, registry.meter("samplesLost").getCount());
     }
 
+    /**
+     * Nothing the send path throws may kill the shard thread: a dead shard silently strands every
+     * series hashed to it until restart while the other shards look healthy.
+     */
     @Test
     public void survivesAnUnexpectedRuntimeFailureInTheSendPath() {
         sender.failNextSendsWithRuntime(1, new IllegalStateException("simulated transport bug"));

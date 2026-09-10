@@ -51,32 +51,24 @@ import org.opennms.integration.api.v1.timeseries.immutables.ImmutableMetric;
 import org.opennms.integration.api.v1.timeseries.immutables.ImmutableSample;
 
 /**
- * Manual e2e check for write batching (dcy/sharded-write-batching) against a REAL Cortex backend.
- *
- * <p>NOT part of the default test run - it does not end in Test/IT/TestCase in a way that would
- * make it collide with a default `mvn test`, but it must still be invoked explicitly with
- * {@code -Dtest=BatchingRealCortexCheck}, and only once the lab is up:
+ * Manual end-to-end check of the write-batching path against a real Cortex backend. Not part of
+ * the default test run (the class name matches no surefire pattern); from {@code plugin/}, once
+ * the compose lab is up, run it explicitly:
  * <pre>
- *   cd plugin/src/test/resources/org/opennms/timeseries/cortex
- *   docker compose up -d
+ *   docker compose -f src/test/resources/org/opennms/timeseries/cortex/docker-compose.yaml up -d
  *   # wait for http://localhost:9009/ready
- *   cd ../../../../../../../..   (back to plugin/)
  *   mvn -Dtest=BatchingRealCortexCheck test
  *   docker compose -f src/test/resources/org/opennms/timeseries/cortex/docker-compose.yaml down -v
  * </pre>
  *
- * <p>Exists because {@link NMS16271_IT} and {@link CortexTSSIntegrationTest} both use the
- * deprecated {@code DockerComposeContainer}, whose helper image negotiates an old Docker API
- * version that this machine's colima-backed daemon rejects (unrelated to the code under test - the
- * same failure occurs against unmodified {@code main}). Bypassing Testcontainers' compose
- * orchestration entirely and driving an already-running stack matches how OpenNMS's own
- * smoke-test harness (~/github/opennms/smoke-test) does it: no DockerComposeContainer there either.
+ * <p>It drives an already-running stack directly instead of orchestrating one through the
+ * deprecated {@code DockerComposeContainer} the existing ITs use, so it also works where that
+ * helper cannot talk to the local Docker daemon.
  *
- * <p>Unlike the existing IT tests, this specifically exercises {@code batchingEnabled=true}: many
- * distinct series, written from multiple concurrent threads in small OpenNMS-shaped groups (a
- * couple of samples each, interleaved across series - the exact case the per-sample Entry/Series
- * duplication fix targets), then read back sample by sample: every series must hold exactly its
- * written (timestamp, value) sequence, in order, with zero loss.
+ * <p>Unlike the ITs, this exercises {@code batchingEnabled=true}: many distinct series written
+ * concurrently in small OpenNMS-shaped groups (the shape the shared-{@code Series} change
+ * targets), then read back sample by sample - every series must hold exactly its written
+ * (timestamp, value) sequence, in order, with zero loss.
  */
 public class BatchingRealCortexCheck {
 
@@ -117,12 +109,10 @@ public class BatchingRealCortexCheck {
         }
 
         try {
-            // OpenNMS never guarantees ordering ACROSS store() calls for the same series even with
-            // batching enabled (see "Sample ordering" in the README) - that would make this a test
-            // of the documented residual race, not of the fix under test. So each series' samples
-            // are handed to store() strictly in order, a few at a time, all from one task; the
-            // concurrency that matters here - many distinct series resolved through the new Series
-            // cache at once - comes from running many series' tasks across the pool concurrently.
+            // Ordering ACROSS store() calls for one series is not guaranteed even with batching
+            // (see "Sample ordering" in the README), so each series' samples are stored in order
+            // by a single task; the concurrency under test - many distinct series resolved through
+            // the series cache at once - comes from running many series' tasks concurrently.
             final ExecutorService pool = Executors.newFixedThreadPool(8);
             final int groupSize = 3;
             for (List<Sample> series : bySeries.values()) {
@@ -148,15 +138,12 @@ public class BatchingRealCortexCheck {
             assertEquals("no sample may be lost against a healthy backend",
                     0, storage.getMetrics().meter("samplesLost").getCount());
 
-            // Verify against Cortex's query API directly rather than through CortexTSS#getTimeseries:
-            // the write path is what changed here, and this repo's own CortexTSSIntegrationTest
-            // notes Cortex's query_range semantics for raw (unaggregated) data are quirky enough to
-            // need a workaround there - query_range returns step-aligned values, not the raw
-            // samples. An instant query over a range-vector selector (metric{...}[2m]) has no step
-            // to align to: it returns every raw sample in the window, so the assertion can demand
-            // the full sequence - every timestamp, every value, in order, nothing missing, nothing
-            // extra, for every series. A bug that dropped or corrupted intermediate samples while
-            // still landing each series' last one would pass a last-value check but not this.
+            // Verified against Cortex's query API rather than CortexTSS#getTimeseries: only the
+            // write path changed here, and query_range returns step-aligned values, not raw
+            // samples (see CortexTSSIntegrationTest's workaround). An instant query over a
+            // range-vector selector (metric{...}[2m]) has no step: it returns every raw sample in
+            // the window, so the assertion can demand the full sequence for every series - a bug
+            // that dropped intermediate samples but landed each series' last one would fail here.
             final HttpClient http = HttpClient.newHttpClient();
             for (Map.Entry<Metric, List<Sample>> entry : bySeries.entrySet()) {
                 final Metric metric = entry.getKey();

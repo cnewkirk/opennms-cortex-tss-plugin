@@ -24,14 +24,12 @@ package org.opennms.timeseries.cortex.batch;
 import org.opennms.integration.api.v1.timeseries.StorageException;
 
 /**
- * A write failure that applies to the whole request or connection, not to any one series inside
- * it: bad or expired credentials, the wrong tenant, the wrong endpoint, the wrong method. Every
- * series in the request would fail identically, so unlike a plain {@link StorageException} - which
- * {@link ShardedWriteBatcher} treats as plausibly naming one bad series and bisects to isolate -
- * this can only be dropped whole. Bisecting it would still corner nothing: every half, and every
- * half of every half, fails the same way, so the shard would spend up to one request per series in
- * the batch confirming a foregone conclusion, stalled the whole time its queue keeps filling behind
- * it.
+ * A write failure that applies to the whole request, not to any one series inside it: bad
+ * credentials, the wrong tenant, the wrong endpoint. Unlike a plain {@link StorageException},
+ * which {@link ShardedWriteBatcher} treats as plausibly naming one bad series and bisects to
+ * isolate, this is dropped whole: every bisected half would fail identically, so isolation could
+ * only spend up to one request per series confirming that, stalling the shard while its queue
+ * fills behind it.
  */
 public class NonIsolableWriteException extends StorageException {
 

@@ -72,24 +72,21 @@ import prometheus.PrometheusTypes;
  *
  * <p>Failure semantics: a batch that fails with a {@link RetryableWriteException} is retried in
  * place with exponential backoff up to {@code maxRetries} times; the shard sends nothing else while
- * that goes on. When a request carrying more than one series fails with a plain
+ * that goes on. A multi-series request that fails with a plain
  * {@link org.opennms.integration.api.v1.timeseries.StorageException} - a rejection that plausibly
- * names one bad series, such as an out-of-order sample - it is bisected and each half resent (still
- * sequentially, on the shard thread, so ordering holds), cornering a rejected series in O(log n)
- * extra requests rather than one request per series, so a single series the backend rejects does
- * not take unrelated samples down with it. A {@link NonIsolableWriteException} - a rejection of the
- * request itself, such as bad credentials or the wrong tenant, that every series in it would share
- * - is never bisected: every half would fail identically, so isolating it could only spend up to one
- * request per series confirming a foregone conclusion while the shard sat idle and its queue filled
- * up behind it. Two budgets, shared between a batch and every resend its isolation spawns, bound
- * the shard's exposure even when the backend mixes fatal and retryable failures: {@code maxRetries}
- * caps the backoffs spent on retryable failures, and a consecutive-rejection cap sized to the
- * bisection depth cuts isolation short when every request fails without a single success - the
- * signature of a rejection that is request-wide in effect (timestamps the backend no longer
- * accepts, a tenant over its series limit) even when its status code says per-series. A series that still fails, or a request
- * whose budget is exhausted, is dropped and counted on the shared {@code samplesLost} meter, and the
- * shard moves on. That trades bounded head-of-line blocking for forward progress; samples enqueued
- * behind a dropped batch survive.
+ * names one bad series, such as an out-of-order sample - is bisected and each half resent (still
+ * sequentially, on the shard thread, so ordering holds), cornering the rejected series in O(log n)
+ * extra requests so it does not take unrelated samples down with it. A
+ * {@link NonIsolableWriteException} - a rejection of the request itself, such as bad credentials,
+ * that every series in it shares - is dropped whole, never bisected. Two budgets, shared between a
+ * batch and every resend its isolation spawns, bound the shard's exposure: {@code maxRetries} caps
+ * the backoffs spent on retryable failures, and a consecutive-rejection cap sized to the bisection
+ * depth cuts isolation short when every request fails without a single success - the signature of
+ * a rejection that is request-wide in effect (timestamps the backend no longer accepts, a tenant
+ * over its series limit) even when its status says per-series. A series that still fails, or a
+ * request whose budget is exhausted, is dropped and counted on the shared {@code samplesLost}
+ * meter, and the shard moves on: bounded head-of-line blocking, traded for forward progress, so
+ * samples enqueued behind a dropped batch survive.
  */
 public class ShardedWriteBatcher {
 
@@ -422,10 +419,8 @@ public class ShardedWriteBatcher {
                     return;
                 }
             } catch (NonIsolableWriteException e) {
-                // The rejection applies to the whole request, not to any one series in it - see
-                // NonIsolableWriteException. Bisecting would only repeat the same failure at every
-                // leaf, for up to one request per series, while this shard sits idle and its queue
-                // backs up behind it. Drop the whole thing in one step instead.
+                // A request-level rejection: every series in it fails identically (see the
+                // exception's javadoc), so bisecting could corner nothing. Drop in one step.
                 drop(sampleCount, "the backend rejected the whole request, not a specific series", e);
                 return;
             } catch (StorageException e) {
@@ -435,13 +430,10 @@ public class ShardedWriteBatcher {
                 final boolean systemic = seriesCount > 1 && budget.noteRejection();
                 if (seriesCount > 1) {
                     if (systemic) {
-                        // Every request of this batch's isolation has failed, for longer than any
-                        // single rejected series can explain (the longest all-failing run a lone
-                        // poison series produces is the bisection path down to it). The rejection
-                        // is request-wide in effect - a 400 for timestamps the backend no longer
-                        // accepts, a tenant over its series limit - even though its status says
-                        // per-series. Bisecting further would only replay the failure at every
-                        // node, up to one request per series; drop the rest in one step instead.
+                        // A longer all-failing run than the bisection path to a lone poison series
+                        // can explain: the rejection is request-wide in effect (timestamps the
+                        // backend no longer accepts, a tenant over its limit) even though its
+                        // status says per-series. Stop bisecting; drop the rest in one step.
                         drop(sampleCount, "isolation was cut short after " + budget.rejectionCap
                                 + " consecutive rejections without a single accepted request; "
                                 + "treating the rejection as systemic, not per-series", e);
@@ -486,12 +478,9 @@ public class ShardedWriteBatcher {
     }
 
     /**
-     * Bounds for one original batch and everything its isolation resends, shared across the whole
-     * recursion. Two independent limits: retries left for retryable failures (backoffs), and the
-     * longest run of consecutive non-retryable rejections tolerated before the rejection is
-     * declared systemic - a lone poison series can only produce an all-failing run as long as the
-     * bisection path down to it, so a longer run means every leaf would fail and isolation is
-     * confirming a foregone conclusion at up to one request per series. Only touched from the
+     * Bounds shared by one original batch and everything its isolation resends: retries left for
+     * retryable failures, and the longest run of consecutive rejections tolerated before the
+     * rejection is declared systemic (sized by {@link #rejectionCapFor}). Only touched from the
      * owning shard thread, so plain ints suffice.
      */
     private static final class RetryBudget {
@@ -669,20 +658,11 @@ public class ShardedWriteBatcher {
     }
 
     /**
-     * Identity of one series: the exact label set it will carry on the wire, plus the tenant, since
-     * two tenants may legitimately carry the same series. Nothing upstream of the converter can
-     * stand in for this. Metric.getKey() covers only the intrinsic tags while the converter also
-     * emits the meta tags as labels, so two samples whose meta tags differ are different wire series
-     * and must not coalesce; and sanitization is lossy, so two distinct raw keys can emit one and
-     * the same label set and must land on the same shard for per-series ordering to hold. The label
-     * list arrives sorted by name from the converter, so equal series compare equal.
-     *
-     * <p>{@link #seriesCache} holds one of these per distinct series and every buffered
-     * {@link Entry} for that series points at it, rather than each carrying its own copy of the
-     * label list and key: at default sizing a shard can buffer tens of thousands of samples,
-     * almost always many samples per series, so per-sample duplication of series-level data is pure
-     * waste - and heaviest exactly when a shard is backlogged, which is when the extra heap and GC
-     * pressure can least be afforded.
+     * The series-level data all buffered {@link Entry}s of one series share through
+     * {@link #seriesCache}, instead of each sample carrying its own copy of the label list and
+     * key. At default sizing a shard can buffer tens of thousands of samples, usually many per
+     * series, so per-sample duplication of series-level data is pure heap and GC overhead -
+     * heaviest exactly when a shard is backlogged and can least afford it.
      */
     private static final class Series {
         private final String organizationId;
@@ -695,14 +675,21 @@ public class ShardedWriteBatcher {
     }
 
     /**
-     * A series' identity as a value type: the tenant plus the exact, immutable label set, compared
-     * structurally. Deliberately not a flattened string: label values may contain any bytes -
-     * sanitization only truncates them - so whatever delimiter a flattened encoding picked could
-     * also appear inside a value, and two distinct label sets could then collide on one key (e.g.
-     * with {@code \0}/{@code \1} delimiters, {@code {a="x", b="y"}} and {@code {a="x\0b\1y"}}
-     * flatten identically). A colliding key would coalesce foreign samples under the wrong labels
-     * for as long as {@link #seriesCache} kept the entry alive. Structural equality over the fields
-     * themselves leaves no encoding to collide in.
+     * A series' identity as a value type: the tenant (two tenants may legitimately carry the same
+     * series) plus the exact, immutable label set the series will carry on the wire. Nothing
+     * upstream of the converter can stand in for the label set: Metric.getKey() misses the meta
+     * tags the converter also emits as labels, and sanitization is lossy, so two distinct raw keys
+     * can emit the same wire series and must land on the same shard for per-series ordering to
+     * hold. The label list arrives sorted by name from the converter, so equal series compare
+     * equal.
+     *
+     * <p>Compared structurally, deliberately not flattened to a string: label values may contain
+     * any bytes - sanitization only truncates - so any delimiter could also appear inside a value,
+     * and two distinct label sets could then collide on one key ({@code {a="x", b="y"}} and
+     * {@code {a="x\0b\1y"}} flatten identically under {@code \0}/{@code \1} delimiters). A
+     * colliding key would coalesce foreign samples under the wrong labels for as long as
+     * {@link #seriesCache} kept the entry alive; structural equality leaves no encoding to collide
+     * in.
      */
     private static final class SeriesKey {
         private final String orgKey;

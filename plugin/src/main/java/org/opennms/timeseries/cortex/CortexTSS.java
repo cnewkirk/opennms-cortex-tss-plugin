@@ -232,11 +232,10 @@ public class CortexTSS implements TimeSeriesStorage {
             this.batcher = null;
         }
 
-        // Mirror the registry as JMX MBeans under the plugin's config PID, the same way core's
-        // own daemons expose theirs (the timeseries integration layer registers
-        // org.opennms.timeseries identically), so the JMX collection already scraping this JVM
-        // can trend these counters - samplesLost above all. See "Monitoring the plugin" in the
-        // README for a collection recipe.
+        // Mirror the registry as MBeans under the plugin's config PID - the same pattern the
+        // timeseries integration layer uses for org.opennms.timeseries - so the JMX collection
+        // already scraping this JVM can trend samplesLost and the rest. See "Monitoring the
+        // plugin" in the README.
         this.jmxReporter = JmxReporter.forRegistry(metrics).inDomain(JMX_DOMAIN).build();
         this.jmxReporter.start();
     }
@@ -253,24 +252,20 @@ public class CortexTSS implements TimeSeriesStorage {
     }
 
     /**
-     * Whether an HTTP status rejects the request itself rather than any particular series inside
-     * it - bad or expired credentials (401), the wrong tenant (403), the wrong endpoint (404),
-     * the wrong method (405), an unsupported payload encoding (415), and the rest of that long
-     * tail. Every series in such a request would fail identically, so {@link ShardedWriteBatcher}
-     * must not spend a request per series bisecting toward that foregone conclusion - see
-     * {@link NonIsolableWriteException}. Rather than enumerate request-level codes, every
-     * non-retryable 4xx is request-level except the two a backend plausibly ties to one series:
-     * 400, the remote-write spec's status for rejected samples (out-of-order, duplicates, invalid
-     * labels), and 413, which a smaller bisected request can fit under. 429 never reaches this
-     * check - it is retried.
+     * Whether an HTTP status rejects the request itself - bad credentials (401), wrong tenant
+     * (403), wrong endpoint (404), unsupported payload (415), and the rest of that tail - rather
+     * than one series inside it. Every series in such a request fails identically, so
+     * {@link ShardedWriteBatcher} drops it whole instead of bisecting (see
+     * {@link NonIsolableWriteException}). Rather than enumerate codes, every non-retryable 4xx is
+     * request-level except the two a backend plausibly ties to one series: 400, the remote-write
+     * status for rejected samples, and 413, which a smaller bisected request can fit under.
+     * 429 is retried and never reaches this check.
      *
      * <p>403 is a judgment call: a backend enforcing per-series ACLs could in principle 403 one
-     * series rather than the request, and bisection would then rescue the permitted ones. No
-     * mainstream remote-write backend does that - Cortex/Mimir/Thanos reject at the tenant or
-     * request level and use 400/429 for per-series and limit problems - while 403 from a
-     * misconfigured credential or tenant is exactly the standing failure whose bisection storms
-     * stall a shard. If such a backend ever materializes, revisit with response-body
-     * classification rather than a blanket recategorization.
+     * series, and bisection would rescue the rest. No mainstream backend does - Cortex, Mimir and
+     * Thanos use 400/429 for per-series and limit problems - while a 403 from a misconfigured
+     * credential or tenant is exactly the standing failure whose bisection storm stalls a shard.
+     * If such a backend appears, classify by response body rather than recategorizing 403.
      */
     private static boolean isNonIsolableStatus(final int status) {
         return status >= 400 && status < 500 && status != 400 && status != 413 && status != 429;

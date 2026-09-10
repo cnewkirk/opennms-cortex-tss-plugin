@@ -138,7 +138,7 @@ allows because their series sets are disjoint.
 | `batchMaxSamples` | `2000` | A batch is flushed when it holds this many samples. |
 | `batchLingerMs` | `500` | A batch is flushed this long after its first sample, even if not full. |
 | `batchShardCapacity` | `65536` | Buffered samples per shard. A full shard blocks `store()` up to `batchEnqueueTimeoutMs`, then the write fails and the samples count as lost. |
-| `batchMaxRetries` | `3` | Retries per batch for retryable failures (HTTP 429, 5xx, and I/O errors), with exponential backoff starting at `batchRetryBackoffMs` and capped at 60s. Other 4xx responses are never retried, and they split two ways. Every 4xx except 400 and 413 rejects the request itself — bad credentials, wrong tenant, wrong endpoint, wrong method, unsupported payload — so every series in the batch would fail identically: the batch is dropped whole after a single request, with no bisection. 400 and 413 are the two a backend plausibly ties to one bad series, so a coalesced request they reject is bisected and resent in halves, cornering the rejected series in a logarithmic number of resends so only what the backend actually rejects is dropped and counted on `samplesLost`. The retry budget is shared between a batch and any resends its bisection spawns, so a batch occupies its shard for a bounded number of requests and backoffs even when the backend mixes fatal and retryable failures. A request that exhausts the budget is dropped whole. The shard then moves on, so samples behind a dropped batch survive. |
+| `batchMaxRetries` | `3` | Retries per batch for retryable failures (HTTP 429, 5xx, and I/O errors), with exponential backoff starting at `batchRetryBackoffMs` and capped at 60s. Other 4xx responses are never retried and split two ways. Every 4xx except 400 and 413 rejects the request itself (bad credentials, wrong tenant, wrong endpoint), so every series in it would fail identically: the batch is dropped whole after a single request, with no bisection. 400 and 413 are the two a backend plausibly ties to one bad series, so a coalesced request they reject is bisected and resent in halves, cornering the rejected series in a logarithmic number of resends — only what the backend actually rejects is dropped and counted on `samplesLost`. One retry budget is shared between a batch and every resend its bisection spawns, so a batch occupies its shard for a bounded number of requests and backoffs even when the backend mixes fatal and retryable failures. A request that exhausts the budget is dropped whole, and the shard moves on: samples behind a dropped batch survive. |
 | `batchRetryBackoffMs` | `1000` | Initial retry backoff; doubles per attempt. |
 | `batchEnqueueTimeoutMs` | `5000` | Upper bound on how long one `store()` call may block on full shards, shared across all samples of the call. When it expires, the remaining samples are only accepted if their shards have room. |
 
@@ -222,9 +222,8 @@ Notes:
   collection simply yields no data.
 - The counters are per-JVM and reset on restart; `type="counter"` in the collection definition
   handles that the same way any counter reset is handled.
-- The collected series are stored through this very plugin, which is exactly what you want for
-  the "is batching losing samples?" comparison: a nonzero `samplesLost` rate trends in the same
-  place as everything else.
+- The collected series are stored through this very plugin, so a nonzero `samplesLost` rate
+  trends in the same place as everything else it stores.
 
 ## Sample ordering and out-of-order rejections
 
